@@ -45,8 +45,148 @@ WKHTMLTOX_X32=https://raw.githubusercontent.com/bacgroup/InstallScript/12.0/wkht
 echo -e "\n---- Update Server ----"
 # universe package is for Ubuntu 18.x
 sudo add-apt-repository universe
-sudo apt-get update
+sudo apt-get update -y
 sudo apt-get upgrade -y
+
+apt-get install -y lsof
+
+for port in 80, 5432, 8069 ; do
+    if lsof -Pi :$port -sTCP:LISTEN -t >/dev/null ; then
+        echo "This script needs $port PORT available" 
+        exit 1
+    else
+        echo "Check for $port PORT is available: OK"
+    fi
+done
+
+#--------------------------------------------------
+# Install HAPROXY
+#--------------------------------------------------
+
+apt-get install -y haproxy locales
+
+cat <<EOF > /etc/haproxy/haproxy.cfg
+global
+    log /dev/log    local0
+    log /dev/log    local1 notice
+    chroot /var/lib/haproxy
+    stats socket /run/haproxy/admin.sock mode 660 level admin
+    stats timeout 30s
+    user haproxy
+    group haproxy
+    daemon
+    # Default SSL material locations
+    ca-base /etc/ssl/certs
+    crt-base /etc/ssl/private
+    # Default ciphers to use on SSL-enabled listening sockets.
+    # For more information, see ciphers(1SSL). This list is from:
+    #  https://hynek.me/articles/hardening-your-web-servers-ssl-ciphers/
+    ssl-default-bind-ciphers ECDH+AESGCM:DH+AESGCM:ECDH+AES256:DH+AES256:ECDH+AES128:DH+AES:ECDH+3DES:DH+3DES:RSA+AESGCM:RSA+AES:RSA+3DES:!aNULL:!MD5:!DSS
+    ssl-default-bind-options no-sslv3
+defaults
+    log    global
+    mode    http
+    option    httplog
+    option    dontlognull
+        timeout connect 5000
+        timeout client  500000
+        timeout server  500000 
+    errorfile 400 /etc/haproxy/errors/400.http
+    errorfile 403 /etc/haproxy/errors/403.http
+    errorfile 408 /etc/haproxy/errors/408.http
+    errorfile 500 /etc/haproxy/errors/500.http
+    errorfile 502 /etc/haproxy/errors/502.http
+    errorfile 503 /etc/haproxy/errors/503.http
+    errorfile 504 /etc/haproxy/errors/504.http
+frontend localhost
+    bind *:80
+    #bind *:443 ssl crt /etc/ssl/certs/commercial.pem
+    #redirect scheme https if !{ ssl_fc }
+    mode http
+    default_backend nodes
+backend nodes
+    mode http
+    balance roundrobin
+    cookie SERVERID insert indirect nocache
+    option forwardfor
+    option httpchk HEAD / HTTP/1.1\r\nHost:localhost
+    server odoo 127.0.0.1:8069 check cookie s1
+#    server odoo001 127.0.0.1:8070 check cookie s2
+#    server odoo002 127.0.0.1:8071 check cookie s3
+#    server odoo003 127.0.0.1:8072 check cookie s4
+#    server odoo004 127.0.0.1:8073 check cookie s5
+#    server odoo005 127.0.0.1:8074 check cookie s6
+#    server odoo006 127.0.0.1:8075 check cookie s7
+#    server odoo007 127.0.0.1:8076 check cookie s8
+#    server odoo008 127.0.0.1:8077 check cookie s9
+    http-request set-header X-Forwarded-Port %[dst_port]
+    http-request add-header X-Forwarded-Proto https if { ssl_fc }
+EOF
+
+service haproxy restart
+
+#--------------------------------------------------
+# Install PostgreSQL Server
+#--------------------------------------------------
+cat <<EOF > /usr/bin/odoofilestoreengine.sh
+#!/bin/bash
+#Script que hace backups de todas las bases de datos
+
+# Para restaurar es necesario descomprimir el archivo bk_filestore_xxxxxxxx_xxxxxx.tar.gz en /home/odoo/.local/share/Odoo/
+# < cp bk_filestore_xxxxxxxx_xxxxxx.tar.gz /home/odoo/.local/share/Odoo/ && cd /home/odoo/.local/share/Odoo/ && tar -xf /home/odoo/.local/share/Odoo/ >
+bkdir="/home/cust/odoo/backup/"
+mkdir -p \$bkdir >> /dev/null 2>&1
+cd /home/odoo/.local/share/Odoo/
+tar -zcvf bk_filestore_"\$(date +%Y%m%d_%H%M%S)".tar.gz filestore
+mv bk_* \$bkdir
+find \$bkdir/bk_filestore* -mtime +7 -exec rm -rf {} \;
+EOF
+
+cat <<EOF > /usr/bin/odoobackupengine.sh
+#!/bin/bash
+#Script que hace backups de todas las bases de datos
+
+# Para restarurar un Backup Custom de PostgreSQL descomprimir tar y restarurar de la siguiente forma:
+# < tar -xf bk_xxxxxxxx_xxxxxx.tar >
+# < pg_restore -d nombre_bd archivo.backup >
+
+bkdir="/home/cust/odoo/backup/"
+txt="/tmp/bd.txt"
+bktmp="/tmp/backups_postgresql"
+bkname=bk_"\$(date +%Y%m%d_%H%M%S)".tar
+
+#Inicia el proceso
+rm -rf \$bktmp
+mkdir -p \$bktmp
+
+sudo -u postgres psql -c "COPY (SELECT pg_database.datname from pg_database where pg_database.datname not in ('template0','template1','postgres')) TO '\$txt';"
+
+#Ciclo que recorre el txt con las bases de datos
+while read line
+do
+   sudo -u postgres pg_dump "\$line" -Fc -O > "\$bktmp/bk_\$line".backup
+done < \$txt
+cd /tmp/
+tar ccvf \$bkname  backups*
+mv /tmp/\$bkname \$bkdir
+
+find /home/cust/odoo/backup -iname "bk_*" -mtime +7 -exec rm -rf {} \;
+EOF
+
+
+chmod uog+x /usr/bin/odoofilestoreengine.sh
+chmod uog+x /usr/bin/odoobackupengine.sh
+
+echo "0 */3 * * * /usr/bin/odoofilestoreengine.sh >> /dev/null 2>&1 #Uncomment is Odoo Services" >> /var/spool/cron/crontabs/root
+echo "0 */3 * * * /usr/bin/odoobackupengine.sh >> /dev/null 2>&1 #Uncomment if PSQL Service" >> /var/spool/cron/crontabs/root
+
+sudo export LANGUAGE=en_US.UTF-8
+sudo export LANG=en_US.UTF-8
+sudo export LC_ALL=en_US.UTF-8
+sudo locale-gen en_US.UTF-8
+sudo dpkg-reconfigure locales
+sudo update-locale LANG=en_US.UTF-8
+
 
 #--------------------------------------------------
 # Install PostgreSQL Server
@@ -261,3 +401,5 @@ echo "Start Odoo service: sudo service $OE_CONFIG start"
 echo "Stop Odoo service: sudo service $OE_CONFIG stop"
 echo "Restart Odoo service: sudo service $OE_CONFIG restart"
 echo "-----------------------------------------------------------"
+rm -rf /root/.netrc
+
