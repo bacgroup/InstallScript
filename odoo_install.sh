@@ -88,9 +88,13 @@ defaults
     mode    http
     option    httplog
     option    dontlognull
-        timeout connect 5000
-        timeout client  500000
-        timeout server  500000 
+        retries                 3
+        timeout http-request    10000ms
+        timeout connect 30000ms
+        timeout client  30000ms
+        timeout server  30000ms
+        timeout http-keep-alive 10000ms
+        timeout check           10000ms 
     errorfile 400 /etc/haproxy/errors/400.http
     errorfile 403 /etc/haproxy/errors/403.http
     errorfile 408 /etc/haproxy/errors/408.http
@@ -180,9 +184,6 @@ chmod uog+x /usr/bin/odoobackupengine.sh
 echo "0 */3 * * * /usr/bin/odoofilestoreengine.sh >> /dev/null 2>&1 #Uncomment is Odoo Services" >> /var/spool/cron/crontabs/root
 echo "0 */3 * * * /usr/bin/odoobackupengine.sh >> /dev/null 2>&1 #Uncomment if PSQL Service" >> /var/spool/cron/crontabs/root
 
-sudo export LANGUAGE=en_US.UTF-8
-sudo export LANG=en_US.UTF-8
-sudo export LC_ALL=en_US.UTF-8
 sudo locale-gen en_US.UTF-8
 sudo dpkg-reconfigure locales
 sudo update-locale LANG=en_US.UTF-8
@@ -301,6 +302,7 @@ if [ $IS_ENTERPRISE = "True" ]; then
 else
     sudo su root -c "printf 'addons_path=${OE_HOME_EXT}/addons,${OE_HOME}/custom/addons\n' >> /etc/${OE_CONFIG}.conf"
 fi
+sudo su root -c "printf 'proxy_mode = True\nlimit_time_cpu = 3600\nlimit_time_real = 3600\nlimit_time_real_cron = 3600\n' >> /etc/${OE_CONFIG}.conf"
 sudo chown $OE_USER:$OE_USER /etc/${OE_CONFIG}.conf
 sudo chmod 640 /etc/${OE_CONFIG}.conf
 
